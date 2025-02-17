@@ -1,134 +1,104 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { Editor, Notice, Plugin} from 'obsidian';
 
-// Remember to rename these classes and interfaces!
-
-interface MyPluginSettings {
-	mySetting: string;
-}
-
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
+interface UploadResponse {
+    data: {
+        links: {
+            url: string;
+        };
+    };
 }
 
 export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
-
 	async onload() {
-		await this.loadSettings();
+		this.registerEvent(
+			this.app.workspace.on('editor-paste', async (evt, editor, view) => {
+				this.handlePaste(evt, editor);
+			})
+		);
+	}
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
+	async handlePaste(event: ClipboardEvent, editor: Editor) {
+		if (!event.clipboardData?.files.length) return;
+		const files = Array.from(event.clipboardData.files).filter(file =>
+			file.type.startsWith('image/')
+		);
+		if (files.length === 0) return;
+		for (const file of files) {
+			try {
+				event.preventDefault()
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
+				// 记录插入前的位置
+				const startPos = editor.getCursor();
 
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
+				// 保存到本地临时文件
+				const tempPath = await this.saveTempFile(file);
+				const tempMarkdown = `![${file.name}](${tempPath})`;
+				
+				// 插入本地图片
+				editor.replaceSelection(tempMarkdown);
+
+				// 记录插入后的位置
+				const endPos = editor.getCursor();
+				
+				// 异步上传到图床
+				const remoteUrl = await this.uploadToImageHosting(file);
+				
+				// 替换为远程链接
+				const finalMarkdown = `![${file.name}](${remoteUrl})`;
+				editor.getDoc().replaceRange(finalMarkdown, startPos, endPos)
+				
+				// 删除临时文件
+				await this.deleteTempFile(tempPath);
+			} catch (error) {
+				new Notice(`Image upload filed: ${error.message}`);
 			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-			}
-		});
-
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
+		}
 	}
 
-	onunload() {
+	private async saveTempFile(file: File): Promise<string> {
+        const tempDir = `assets/`;
+        const tempPath = `${tempDir}${Date.now()}_${file.name}`;
+        
+        // 确保目录存在
+        await this.app.vault.adapter.mkdir(tempDir);
+        
+        // 写入文件
+        const arrayBuffer = await file.arrayBuffer();
+        await this.app.vault.adapter.writeBinary(tempPath, arrayBuffer);
+        
+        return tempPath;
+    }
 
-	}
+	private async uploadToImageHosting(file: File): Promise<string> {
+        const formData = new FormData();
+        formData.append('file', file, file.name);
 
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-	}
+        try {
+            const response = await fetch('https://image.eskr.top/api/v1/upload', {
+                method: 'POST',
+                headers: {
+					'Authorization': 'Bearer 1|qcjtavsRMsMvW5iHtZ50HovdDUR7c5rC1WGeOl7h',
+					'Accept': 'application/json'
+                },
+                body: formData,
+            });
 
-	async saveSettings() {
-		await this.saveData(this.settings);
-	}
-}
+            if (!response.ok) {
+                throw new Error(`HTTP error: ${response.status}`);
+            }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+            const data: UploadResponse = await response.json();
+            return data.data.links.url;
+        } catch (error) {
+            throw new Error(`Upload failed: ${error.message}`);
+        }
+    }
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
+	private async deleteTempFile(path: string): Promise<void> {
+        if (await this.app.vault.adapter.exists(path)) {
+            await this.app.vault.adapter.remove(path);
+        }
+    }
 
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
-
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
-
-	constructor(app: App, plugin: MyPlugin) {
-		super(app, plugin);
-		this.plugin = plugin;
-	}
-
-	display(): void {
-		const {containerEl} = this;
-
-		containerEl.empty();
-
-		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
-				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
-					await this.plugin.saveSettings();
-				}));
-	}
+	unload(): void {}
 }
