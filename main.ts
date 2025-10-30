@@ -1,4 +1,15 @@
-import { Editor, Notice, Plugin} from 'obsidian';
+import { App, Editor, Notice, Plugin, PluginSettingTab, Setting} from 'obsidian';
+
+interface ImagePluginSettings {
+	apiHost: string;
+	apiToken: string;
+}
+
+const DEFAULT_SETTINGS: ImagePluginSettings = {
+	apiHost: '',
+	apiToken: '',
+};
+
 
 interface UploadResponse {
     data: {
@@ -8,8 +19,54 @@ interface UploadResponse {
     };
 }
 
-export default class MyPlugin extends Plugin {
+class ImagePluginSettingTab extends PluginSettingTab {
+	plugin: ImagePlugin;
+
+	constructor(app: App, plugin: ImagePlugin) {
+		super(app, plugin);
+		this.plugin = plugin;
+	}
+
+	display(): void {
+		const { containerEl } = this;
+		containerEl.empty();
+		containerEl.createEl('h2', { text: 'Image Upload Settings' });
+
+		new Setting(containerEl)
+			.setName('API URL')
+			.setDesc('Server Upload API URL')
+			.addText(text =>
+				text
+					.setPlaceholder('https://example.com/api/v1/upload')
+					.setValue(this.plugin.settings.apiHost)
+					.onChange(async v => {
+						this.plugin.settings.apiHost = v.trim();
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName('Token')
+			.setDesc('Authorization Bearer Token')
+			.addText(text =>
+				text
+					.setPlaceholder('1|xxxxxxxxxx')
+					.setValue(this.plugin.settings.apiToken)
+					.onChange(async v => {
+						this.plugin.settings.apiToken = v.trim();
+						await this.plugin.saveSettings();
+					})
+			);
+	}
+}
+
+export default class ImagePlugin extends Plugin {
+	settings: ImagePluginSettings
+
 	async onload() {
+		await this.loadSettings();
+		this.addSettingTab(new ImagePluginSettingTab(this.app, this));
+		
 		this.registerEvent(
 			this.app.workspace.on('editor-paste', async (evt, editor, view) => {
 				this.handlePaste(evt, editor);
@@ -17,7 +74,22 @@ export default class MyPlugin extends Plugin {
 		);
 	}
 
+	async loadSettings() {
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+	}
+
+	async saveSettings() {
+		await this.saveData(this.settings);
+	}
+
 	async handlePaste(event: ClipboardEvent, editor: Editor) {
+		if (!this.settings.apiHost || !this.settings.apiToken) {
+			new Notice('图床 API 地址与 Token未配置', 5000);
+			// 可选：直接打开设置页
+			// (this.app as any).setting.openTabById('my-plugin');
+			return;
+		}
+
 		if (!event.clipboardData?.files.length) return;
 		const files = Array.from(event.clipboardData.files).filter(file =>
 			file.type.startsWith('image/')
@@ -72,12 +144,13 @@ export default class MyPlugin extends Plugin {
 	private async uploadToImageHosting(file: File): Promise<string> {
         const formData = new FormData();
         formData.append('file', file, file.name);
+		formData.append('strategy_id', '3')
 
         try {
-            const response = await fetch('https://image.eskr.top/api/v1/upload', {
+            const response = await fetch(this.settings.apiHost, {
                 method: 'POST',
                 headers: {
-					'Authorization': 'Bearer 1|qcjtavsRMsMvW5iHtZ50HovdDUR7c5rC1WGeOl7h',
+					'Authorization': `Bearer ${this.settings.apiToken}`,
 					'Accept': 'application/json'
                 },
                 body: formData,
