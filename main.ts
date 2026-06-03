@@ -1,22 +1,23 @@
-import { App, Editor, Notice, Plugin, PluginSettingTab, Setting} from 'obsidian';
+import { App, Editor, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
 
 interface ImagePluginSettings {
 	apiHost: string;
 	apiToken: string;
+	uploadTimeout: number;
 }
 
 const DEFAULT_SETTINGS: ImagePluginSettings = {
 	apiHost: '',
 	apiToken: '',
+	uploadTimeout: 30000,
 };
 
-
 interface UploadResponse {
-    data: {
-        links: {
-            url: string;
-        };
-    };
+	data: {
+		links: {
+			url: string;
+		};
+	};
 }
 
 class ImagePluginSettingTab extends PluginSettingTab {
@@ -57,16 +58,32 @@ class ImagePluginSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					})
 			);
+
+		new Setting(containerEl)
+			.setName('Upload Timeout')
+			.setDesc('Upload timeout in milliseconds (default 30000)')
+			.addText(text =>
+				text
+					.setPlaceholder('30000')
+					.setValue(String(this.plugin.settings.uploadTimeout))
+					.onChange(async v => {
+						const num = parseInt(v.trim(), 10);
+						if (!isNaN(num) && num > 0) {
+							this.plugin.settings.uploadTimeout = num;
+							await this.plugin.saveSettings();
+						}
+					})
+			);
 	}
 }
 
 export default class ImagePlugin extends Plugin {
-	settings: ImagePluginSettings
+	settings: ImagePluginSettings;
 
 	async onload() {
 		await this.loadSettings();
 		this.addSettingTab(new ImagePluginSettingTab(this.app, this));
-		
+
 		this.registerEvent(
 			this.app.workspace.on('editor-paste', async (evt, editor, view) => {
 				this.handlePaste(evt, editor);
@@ -84,94 +101,99 @@ export default class ImagePlugin extends Plugin {
 
 	async handlePaste(event: ClipboardEvent, editor: Editor) {
 		if (!this.settings.apiHost || !this.settings.apiToken) {
-			new Notice('图床 API 地址与 Token未配置', 5000);
-			// 可选：直接打开设置页
-			// (this.app as any).setting.openTabById('my-plugin');
+			new Notice('图床 API 地址与 Token 未配置', 5000);
 			return;
 		}
 
 		if (!event.clipboardData?.files.length) return;
+
 		const files = Array.from(event.clipboardData.files).filter(file =>
 			file.type.startsWith('image/')
 		);
 		if (files.length === 0) return;
+
+		event.preventDefault();
+
 		for (const file of files) {
+			let tempPath: string | null = null;
+
 			try {
-				event.preventDefault()
-
-				// 记录插入前的位置
-				const startPos = editor.getCursor();
-
-				// 保存到本地临时文件
-				const tempPath = await this.saveTempFile(file);
+				tempPath = await this.saveTempFile(file);
 				const tempMarkdown = `![${file.name}](${tempPath})`;
-				
-				// 插入本地图片
 				editor.replaceSelection(tempMarkdown);
 
-				// 记录插入后的位置
-				const endPos = editor.getCursor();
-				
-				// 异步上传到图床
+				new Notice(`正在上传: ${file.name}...`);
+
 				const remoteUrl = await this.uploadToImageHosting(file);
-				
-				// 替换为远程链接
-				const finalMarkdown = `![${file.name}](${remoteUrl})`;
-				editor.getDoc().replaceRange(finalMarkdown, startPos, endPos)
-				
-				// 删除临时文件
-				await this.deleteTempFile(tempPath);
+
+				// Replace temp path with remote URL by text search,
+				// avoiding fragile cursor-position tracking
+				const content = editor.getValue();
+				const idx = content.lastIndexOf(tempPath);
+				if (idx !== -1) {
+					const from = editor.offsetToPos(idx);
+					const to = editor.offsetToPos(idx + tempPath.length);
+					editor.getDoc().replaceRange(remoteUrl, from, to);
+				}
+
+				new Notice(`${file.name} 上传成功`);
 			} catch (error) {
-				new Notice(`Image upload filed: ${error.message}`);
+				new Notice(`上传失败: ${file.name} — ${error.message}`);
+			} finally {
+				if (tempPath) {
+					await this.deleteTempFile(tempPath);
+				}
 			}
 		}
 	}
 
 	private async saveTempFile(file: File): Promise<string> {
-        const tempDir = `assets/`;
-        const tempPath = `${tempDir}${Date.now()}_${file.name}`;
-        
-        // 确保目录存在
-        await this.app.vault.adapter.mkdir(tempDir);
-        
-        // 写入文件
-        const arrayBuffer = await file.arrayBuffer();
-        await this.app.vault.adapter.writeBinary(tempPath, arrayBuffer);
-        
-        return tempPath;
-    }
+		const tempDir = 'assets/';
+		const tempPath = `${tempDir}${Date.now()}_${file.name}`;
+
+		await this.app.vault.adapter.mkdir(tempDir);
+
+		const arrayBuffer = await file.arrayBuffer();
+		await this.app.vault.adapter.writeBinary(tempPath, arrayBuffer);
+
+		return tempPath;
+	}
 
 	private async uploadToImageHosting(file: File): Promise<string> {
-        const formData = new FormData();
-        formData.append('file', file, file.name);
-		formData.append('strategy_id', '3')
+		const formData = new FormData();
+		formData.append('file', file, file.name);
+		formData.append('strategy_id', '3');
 
-        try {
-            const response = await fetch(this.settings.apiHost, {
-                method: 'POST',
-                headers: {
+		const controller = new AbortController();
+		const timer = setTimeout(() => controller.abort(), this.settings.uploadTimeout);
+
+		try {
+			const response = await fetch(this.settings.apiHost, {
+				method: 'POST',
+				headers: {
 					'Authorization': `Bearer ${this.settings.apiToken}`,
-					'Accept': 'application/json'
-                },
-                body: formData,
-            });
+					'Accept': 'application/json',
+				},
+				body: formData,
+				signal: controller.signal,
+			});
 
-            if (!response.ok) {
-                throw new Error(`HTTP error: ${response.status}`);
-            }
+			if (!response.ok) {
+				throw new Error(`HTTP error: ${response.status}`);
+			}
 
-            const data: UploadResponse = await response.json();
-            return data.data.links.url;
-        } catch (error) {
-            throw new Error(`Upload failed: ${error.message}`);
-        }
-    }
+			const data: UploadResponse = await response.json();
+			return data.data.links.url;
+		} finally {
+			clearTimeout(timer);
+		}
+	}
 
 	private async deleteTempFile(path: string): Promise<void> {
-        if (await this.app.vault.adapter.exists(path)) {
-            await this.app.vault.adapter.remove(path);
-        }
-    }
+		if (await this.app.vault.adapter.exists(path)) {
+			await this.app.vault.adapter.remove(path);
+		}
+	}
 
 	unload(): void {}
 }
