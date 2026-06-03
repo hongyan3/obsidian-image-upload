@@ -9,7 +9,7 @@ interface ImagePluginSettings {
 const DEFAULT_SETTINGS: ImagePluginSettings = {
 	apiHost: '',
 	apiToken: '',
-	uploadTimeout: 30000,
+	uploadTimeout: 2000,
 };
 
 interface UploadResponse {
@@ -61,10 +61,10 @@ class ImagePluginSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Upload Timeout')
-			.setDesc('Upload timeout in milliseconds (default 30000)')
+			.setDesc('Upload timeout in milliseconds (default 2000)')
 			.addText(text =>
 				text
-					.setPlaceholder('30000')
+					.setPlaceholder('2000')
 					.setValue(String(this.plugin.settings.uploadTimeout))
 					.onChange(async v => {
 						const num = parseInt(v.trim(), 10);
